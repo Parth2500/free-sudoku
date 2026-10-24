@@ -1,0 +1,8 @@
+{
+  "appId": "com.freesudoku.app",
+  "appName": "Free Sudoku",
+  "webDir": "dist",
+  "android": {
+    "backgroundColor": "#f6f4ef"
+  }
+}

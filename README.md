@@ -32,6 +32,21 @@ npm run android:apk    # or build a debug APK: android/app/build/outputs/apk/deb
 Set `JAVA_HOME` if Gradle can't find a JDK, e.g.
 `export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"`.
 
+## Releasing
+
+The version lives only in `package.json`; the Android build derives `versionName` and `versionCode`
+(`X*10000 + Y*100 + Z`) from it. Release builds are signed from `android/keystore.properties` (gitignored):
+
+```properties
+storeFile=keystore/free-sudoku.jks
+storePassword=...
+keyAlias=free-sudoku
+keyPassword=...
+```
+
+In Claude Code, `/release X.Y.Z` bumps the version, updates `CHANGELOG.md`, builds, and assembles
+`releases/vX.Y.Z/` with the signed APK, the PWA zip for `https://sudoku.slowatcoding.com`, checksums and release notes.
+
 ## Puzzles
 
 `public/puzzles/<level>.txt` holds one puzzle per line (81 digits, `0` = empty). To regenerate them,

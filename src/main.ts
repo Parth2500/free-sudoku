@@ -4,6 +4,7 @@ import { Capacitor } from '@capacitor/core';
 import { registerSW } from 'virtual:pwa-register';
 import { BOX, COL, PEERS, ROW, parseGrid, solve } from './sudoku';
 import { LEVELS, LEVEL_LABELS, type Level, loadLevel, markPlayed, pickPuzzle } from './puzzles';
+import { addHistory, averageSolveTime, loadHistory } from './history';
 
 // The Android app already serves every file from the APK, so only the web build needs the service worker.
 if (!Capacitor.isNativePlatform()) registerSW({ immediate: true });
@@ -30,9 +31,11 @@ interface Game {
   elapsed: number; // ms
   history: Move[];
   done: boolean;
+  startedAt?: number; // epoch ms; missing on games saved before history existed
 }
 
 interface LevelStats {
+  played?: number; // only counted since history was added
   won: number;
   bestTime: number | null;
 }
@@ -52,6 +55,7 @@ let timerId = 0;
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const homeEl = $('home');
 const gameEl = $('game');
+const historyEl = $('history');
 const boardEl = $('board');
 const padEl = $('pad');
 const timerEl = $('timer');
@@ -92,6 +96,8 @@ for (const level of LEVELS) {
 
 $('continue-btn').addEventListener('click', () => game && showGame());
 $('back-btn').addEventListener('click', showHome);
+$('history-btn').addEventListener('click', showHistory);
+$('history-back-btn').addEventListener('click', showHome);
 $('undo-btn').addEventListener('click', undo);
 $('erase-btn').addEventListener('click', erase);
 $('notes-btn').addEventListener('click', toggleNotes);
@@ -107,6 +113,7 @@ function showHome() {
   stopTimer();
   saveGame();
   gameEl.hidden = true;
+  historyEl.hidden = true;
   homeEl.hidden = false;
   renderHome();
 }
@@ -125,12 +132,19 @@ async function newGame(level: Level) {
   const solution = solve(grid);
   if (!solution) throw new Error(`Puzzle ${level}#${index} has no solution`);
   markPlayed(level, index);
+  // A started game being replaced goes into the history as unfinished.
+  if (game && !game.done && game.history.length) logGame(game, false);
+  const stats = loadStats();
+  const s = (stats[level] ??= { won: 0, bestTime: null });
+  s.played = (s.played ?? 0) + 1;
+  saveStats(stats);
   game = {
     level, index, puzzle: grid, solution,
     values: grid.slice(),
     notes: new Array(81).fill(0),
     mistakes: 0, hints: 0, elapsed: 0,
     history: [], done: false,
+    startedAt: Date.now(),
   };
   selected = -1;
   notesMode = false;
@@ -146,12 +160,56 @@ function renderHome() {
   } else {
     cont.hidden = true;
   }
+}
+
+function showHistory() {
+  homeEl.hidden = true;
+  historyEl.hidden = false;
+  window.scrollTo(0, 0);
+  renderHistory();
+}
+
+const dateFormat = new Intl.DateTimeFormat(undefined, {
+  month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+});
+
+function renderHistory() {
   const stats = loadStats();
-  const parts = LEVELS.flatMap((l) => {
+  const list = loadHistory();
+
+  $('history-summary').innerHTML = LEVELS.map((l) => {
     const s = stats[l];
-    return s?.won ? [`${LEVEL_LABELS[l]}: ${s.won} solved, best ${formatTime(s.bestTime ?? 0)}`] : [];
-  });
-  $('stats').textContent = parts.join('\n');
+    const won = s?.won ?? 0;
+    const played = Math.max(s?.played ?? 0, won);
+    const avg = averageSolveTime(list, l);
+    const dash = '<span class="muted">–</span>';
+    return `<tr>
+      <th scope="row">${LEVEL_LABELS[l]}</th>
+      <td>${played || dash}</td>
+      <td>${won || dash}</td>
+      <td>${s?.bestTime != null ? formatTime(s.bestTime) : dash}</td>
+      <td>${avg != null ? formatTime(avg) : dash}</td>
+    </tr>`;
+  }).join('');
+
+  const listEl = $('history-list');
+  $('history-empty').hidden = list.length > 0;
+  listEl.innerHTML = list.map((e) => {
+    const extras = [
+      e.mistakes ? `${e.mistakes} mistake${e.mistakes === 1 ? '' : 's'}` : '',
+      e.hints ? `${e.hints} hint${e.hints === 1 ? '' : 's'}` : '',
+    ].filter(Boolean).join(' · ');
+    return `<li class="history-row ${e.solved ? 'is-solved' : 'is-unfinished'}">
+      <div>
+        <div class="history-level">${LEVEL_LABELS[e.level] ?? e.level}</div>
+        <div class="history-date">${dateFormat.format(e.endedAt)}${extras ? ` · ${extras}` : ''}</div>
+      </div>
+      <div class="history-result">
+        <div class="history-time">${formatTime(e.elapsed)}</div>
+        <div class="history-status">${e.solved ? 'Solved' : 'Unfinished'}</div>
+      </div>
+    </li>`;
+  }).join('');
 }
 
 // ---------- Rendering ----------
@@ -369,7 +427,8 @@ function win() {
   s.won++;
   const isBest = s.bestTime === null || game.elapsed < s.bestTime;
   if (isBest) s.bestTime = game.elapsed;
-  try { localStorage.setItem(STATS_KEY, JSON.stringify(stats)); } catch { /* ignore */ }
+  saveStats(stats);
+  logGame(game, true);
 
   const extras = [
     `${game.mistakes} mistake${game.mistakes === 1 ? '' : 's'}`,
@@ -387,6 +446,7 @@ function win() {
 // ---------- Keyboard ----------
 
 document.addEventListener('keydown', (e) => {
+  if (!historyEl.hidden && e.key === 'Escape') { showHome(); return; }
   if (gameEl.hidden || winDialog.open || e.metaKey || e.altKey) return;
   if (e.ctrlKey) {
     if (e.key === 'z') { e.preventDefault(); undo(); }
@@ -415,7 +475,7 @@ document.addEventListener('keydown', (e) => {
 if (Capacitor.isNativePlatform()) {
   CapApp.addListener('backButton', () => {
     if (winDialog.open) winDialog.close();
-    else if (!gameEl.hidden) showHome();
+    else if (!gameEl.hidden || !historyEl.hidden) showHome();
     else CapApp.exitApp();
   });
   CapApp.addListener('pause', () => { stopTimer(); saveGame(); });
@@ -438,6 +498,23 @@ function loadGame(): Game | null {
   } catch {
     return null;
   }
+}
+
+function logGame(g: Game, solved: boolean) {
+  addHistory({
+    level: g.level,
+    puzzle: g.index,
+    startedAt: g.startedAt ?? null,
+    endedAt: Date.now(),
+    elapsed: g.elapsed,
+    mistakes: g.mistakes,
+    hints: g.hints,
+    solved,
+  });
+}
+
+function saveStats(stats: Partial<Record<Level, LevelStats>>) {
+  try { localStorage.setItem(STATS_KEY, JSON.stringify(stats)); } catch { /* ignore */ }
 }
 
 function loadStats(): Partial<Record<Level, LevelStats>> {
